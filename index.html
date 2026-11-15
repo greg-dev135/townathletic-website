@@ -578,6 +578,31 @@ footer{padding:56px 0 40px;font-size:15px;color:var(--muted)}
   var busy = false;
   var KEY = 'town-priority-list';
 
+  /* =========================================================
+     HIDDEN CAMPAIGN TRACKING — nothing is shown to the visitor.
+     Reads the ?utm_source / utm_medium / utm_campaign / utm_content
+     tags on the link someone arrived by (ads, bio links) plus the
+     site that sent them, and saves them with the signup. Kept for
+     the browser tab so a visit to the privacy page doesn't lose them.
+     ========================================================= */
+  var TRACK_KEYS = ['utm_source','utm_medium','utm_campaign','utm_content','referrer'];
+  var TRACK = (function(){
+    var t = {}, saved = null, tagged = false;
+    try { saved = JSON.parse(sessionStorage.getItem('town-track') || 'null'); } catch(e){}
+    try {
+      var q = new URLSearchParams(location.search);
+      TRACK_KEYS.slice(0, 4).forEach(function(k){
+        var v = (q.get(k) || '').trim().slice(0, 80);
+        if (v) { t[k] = v; tagged = true; }
+      });
+    } catch(e){}
+    if (!tagged && saved) return saved;                 // came back from another page on this site
+    var ref = document.referrer || '';
+    if (ref && ref.indexOf('//' + location.hostname) < 0) t.referrer = ref.slice(0, 300);
+    try { sessionStorage.setItem('town-track', JSON.stringify(t)); } catch(e){}
+    return t;
+  })();
+
   function store(){ try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch(e){ return []; } }
   function remember(email){ try { var s = store(); if (s.indexOf(email) < 0) s.push(email); localStorage.setItem(KEY, JSON.stringify(s)); } catch(e){} }
 
@@ -633,7 +658,7 @@ footer{padding:56px 0 40px;font-size:15px;color:var(--muted)}
   function collect(){
     var f = new FormData(form);
     var phoneVal = (f.get('phone') || '').trim();
-    return {
+    var row = {
       first_name: (f.get('firstName') || '').trim(),
       last_name: (f.get('lastName') || '').trim(),
       email: (f.get('email') || '').trim().toLowerCase(),
@@ -652,6 +677,8 @@ footer{padding:56px 0 40px;font-size:15px;color:var(--muted)}
       submitted_at: new Date().toISOString(),
       submission_id: (crypto.randomUUID ? crypto.randomUUID() : null)
     };
+    TRACK_KEYS.forEach(function(k){ if (TRACK[k]) row[k] = TRACK[k]; });   // only sent when present
+    return row;
   }
 
   form.addEventListener('submit', function(e){
@@ -681,15 +708,25 @@ footer{padding:56px 0 40px;font-size:15px;color:var(--muted)}
     setBusy(true);
     var ctrl = ('AbortController' in window) ? new AbortController() : null;
     var t = setTimeout(function(){ if (ctrl) ctrl.abort(); }, CONFIG.timeoutMs);
-    fetch(CONFIG.supabaseUrl.replace(/\/+$/,'') + '/rest/v1/' + CONFIG.table, {
+    function post(body){ return fetch(CONFIG.supabaseUrl.replace(/\/+$/,'') + '/rest/v1/' + CONFIG.table, {
       method: 'POST',
       headers: (function(){
         var h = { 'Content-Type': 'application/json', 'apikey': CONFIG.supabaseKey, 'Prefer': 'return=minimal' };
         if (/^eyJ/.test(CONFIG.supabaseKey)) h['Authorization'] = 'Bearer ' + CONFIG.supabaseKey;  // older "anon" keys
         return h;
       })(),
-      body: JSON.stringify(data),
+      body: JSON.stringify(body),
       signal: ctrl ? ctrl.signal : undefined
+    }); }
+    post(data).then(function(res){
+      // Safety net: if the tracking columns haven't been added to the database yet,
+      // save the signup without them rather than lose it.
+      if (res.status === 400 && TRACK_KEYS.some(function(k){ return k in data; })) {
+        var plain = {};
+        Object.keys(data).forEach(function(k){ if (TRACK_KEYS.indexOf(k) < 0) plain[k] = data[k]; });
+        return post(plain);
+      }
+      return res;
     }).then(function(res){
       clearTimeout(t);
       if (res.status === 409) { remember(data.email); throw { dup: true }; }
